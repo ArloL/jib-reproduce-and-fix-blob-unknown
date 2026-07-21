@@ -73,6 +73,7 @@ jobs:
         ./mvnw --batch-mode --no-transfer-progress \
           compile \
           com.google.cloud.tools:jib-maven-plugin:3.4.6:build \
+          -Djib.from.image=eclipse-temurin:25-jre \
           -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
           -Djib.to.tags=latest
   required-status-check:
