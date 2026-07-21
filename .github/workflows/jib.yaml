@@ -1,0 +1,93 @@
+name: Jib
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+  schedule:
+  - cron: "17 6 2 * *"
+permissions: {}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Dump GitHub context
+      env:
+        GITHUB_CONTEXT: ${{ toJSON(github) }}
+      run: echo "$GITHUB_CONTEXT"
+    - name: Dump job context
+      env:
+        JOB_CONTEXT: ${{ toJSON(job) }}
+      run: echo "$JOB_CONTEXT"
+    - name: Dump steps context
+      env:
+        STEPS_CONTEXT: ${{ toJSON(steps) }}
+      run: echo "$STEPS_CONTEXT"
+    - name: Dump runner context
+      env:
+        RUNNER_CONTEXT: ${{ toJSON(runner) }}
+      run: echo "$RUNNER_CONTEXT"
+    - name: Dump strategy context
+      env:
+        STRATEGY_CONTEXT: ${{ toJSON(strategy) }}
+      run: echo "$STRATEGY_CONTEXT"
+    - name: Dump matrix context
+      env:
+        MATRIX_CONTEXT: ${{ toJSON(matrix) }}
+      run: echo "$MATRIX_CONTEXT"
+    - name: Dump environment variables
+      run: set
+  build:
+    name: Build image with Jib
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
+    - uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+      with:
+        cache: maven
+        distribution: temurin
+        java-version-file: demo/.tool-versions
+    - name: Compute image name
+      id: image
+      env:
+        REPOSITORY: ${{ github.repository }}
+      run: |
+        echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+    - name: Build and push image with Jib
+      working-directory: demo
+      env:
+        JIB_TO_AUTH_USERNAME: ${{ github.actor }}
+        JIB_TO_AUTH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        IMAGE: ${{ steps.image.outputs.name }}
+      run: |
+        ./mvnw --batch-mode --no-transfer-progress \
+          package \
+          com.google.cloud.tools:jib-maven-plugin:3.4.6:build \
+          -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
+          -Djib.to.tags=latest
+  required-status-check:
+    name: jib.required-status-check
+    needs:
+    - build
+    # GitHub Actions skips this job when any of the dependents fail. And skips
+    # are considered success in their weird logic. So we always run it and fail
+    # ourselves if necessary
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - run: echo "Use this job as the required status check of this workflow"
+    - name: Check that all jobs were successful
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: |
+        echo "$RESULTS" | jq --exit-status 'all(.result == "success")' || exit 1
