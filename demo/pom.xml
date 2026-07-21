@@ -35,6 +35,24 @@
 			<artifactId>spring-boot-starter</artifactId>
 		</dependency>
 
+		<!--
+			Bloats the Jib dependencies layer to ~150+ MB so pushing to
+			ghcr.io reproduces the intermittent "blob unknown to registry"
+			(BLOB_UNKNOWN) failure that hits large blob uploads. The
+			microsoft-graph jar alone is ~57 MB and pulls in a large Azure
+			dependency tree.
+		-->
+		<dependency>
+			<groupId>com.microsoft.graph</groupId>
+			<artifactId>microsoft-graph</artifactId>
+			<version>6.65.0</version>
+		</dependency>
+		<dependency>
+			<groupId>com.microsoft.graph</groupId>
+			<artifactId>microsoft-graph-beta</artifactId>
+			<version>6.42.0</version>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
