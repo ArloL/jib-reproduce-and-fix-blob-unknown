@@ -66,8 +66,8 @@ jobs:
     - name: Build and push image with Jib
       working-directory: demo
       env:
-        JIB_TO_USERNAME: ${{ github.actor }}
-        JIB_TO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        REGISTRY_USERNAME: ${{ github.actor }}
+        REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         IMAGE: ${{ steps.image.outputs.name }}
       run: |
         ./mvnw --batch-mode --no-transfer-progress \
@@ -75,7 +75,9 @@ jobs:
           com.google.cloud.tools:jib-maven-plugin:3.5.2:build \
           -Djib.from.image=eclipse-temurin:25-jre \
           -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
-          -Djib.to.tags=latest
+          -Djib.to.tags=latest \
+          -Djib.to.auth.username="${REGISTRY_USERNAME}" \
+          -Djib.to.auth.password="${REGISTRY_PASSWORD}"
   required-status-check:
     name: jib.required-status-check
     needs:
