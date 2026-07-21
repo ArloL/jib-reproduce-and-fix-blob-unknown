@@ -72,6 +72,7 @@ jobs:
       run: |
         ./mvnw --batch-mode --no-transfer-progress \
           -DskipTests \
+          -Djava.util.logging.config.file=logging.properties \
           compile \
           com.google.cloud.tools:jib-maven-plugin:3.5.2:build \
           -Djib.from.image=eclipse-temurin:25-jre-alpine \
