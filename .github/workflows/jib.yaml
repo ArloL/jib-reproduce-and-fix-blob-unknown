@@ -66,8 +66,8 @@ jobs:
     - name: Build and push image with Jib
       working-directory: demo
       env:
-        JIB_TO_AUTH_USERNAME: ${{ github.actor }}
-        JIB_TO_AUTH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        JIB_TO_USERNAME: ${{ github.actor }}
+        JIB_TO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         IMAGE: ${{ steps.image.outputs.name }}
       run: |
         ./mvnw --batch-mode --no-transfer-progress \
