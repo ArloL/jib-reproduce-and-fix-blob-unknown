@@ -71,7 +71,7 @@ jobs:
         IMAGE: ${{ steps.image.outputs.name }}
       run: |
         ./mvnw --batch-mode --no-transfer-progress \
-          package \
+          compile \
           com.google.cloud.tools:jib-maven-plugin:3.4.6:build \
           -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
           -Djib.to.tags=latest
