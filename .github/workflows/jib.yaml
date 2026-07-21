@@ -61,8 +61,13 @@ jobs:
       id: image
       env:
         REPOSITORY: ${{ github.repository }}
+        # A unique repository per run/attempt so the large dependency blob
+        # never already exists in the registry. Otherwise Jib sees the blob
+        # (HEAD 200) and skips the upload, which never exercises the flaky
+        # large-blob "blob unknown to registry" (BLOB_UNKNOWN) path.
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
-        echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        echo "name=ghcr.io/${REPOSITORY,,}-repro/${RUN}" >> "$GITHUB_OUTPUT"
     - name: Build and push image with Jib
       working-directory: demo
       env:
