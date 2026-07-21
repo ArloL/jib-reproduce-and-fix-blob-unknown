@@ -56,7 +56,7 @@ jobs:
       with:
         cache: maven
         distribution: temurin
-        java-version-file: demo/.tool-versions
+        java-version-file: .tool-versions
     - name: Compute image name
       id: image
       env:
