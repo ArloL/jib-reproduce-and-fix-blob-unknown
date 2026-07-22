@@ -36,11 +36,18 @@
 		</dependency>
 
 		<!--
-			Bloats the Jib dependencies layer to ~150+ MB so pushing to
+			Bloats the Jib dependencies layer to ~400+ MB so pushing to
 			ghcr.io reproduces the intermittent "blob unknown to registry"
-			(BLOB_UNKNOWN) failure that hits large blob uploads. The
-			microsoft-graph jar alone is ~57 MB and pulls in a large Azure
-			dependency tree.
+			(BLOB_UNKNOWN) failure that hits large blob uploads. All of these
+			are release (non-SNAPSHOT) jars, so Jib packs them into a single
+			"dependencies" layer -> one large blob whose slow server-side
+			commit is what times out.
+
+			- microsoft-graph (+ beta) is ~57 MB each and pulls a large Azure
+			  dependency tree (~150 MB total).
+			- bytedeco ffmpeg-platform bundles FFmpeg native binaries for every
+			  supported OS/arch (~250 MB), pushing the blob past ~400 MB. Drop
+			  it (or swap in opencv-platform too) to dial the size.
 		-->
 		<dependency>
 			<groupId>com.microsoft.graph</groupId>
@@ -51,6 +58,11 @@
 			<groupId>com.microsoft.graph</groupId>
 			<artifactId>microsoft-graph-beta</artifactId>
 			<version>6.42.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.bytedeco</groupId>
+			<artifactId>ffmpeg-platform</artifactId>
+			<version>6.1.1-1.5.10</version>
 		</dependency>
 
 		<dependency>
