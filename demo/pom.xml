@@ -45,9 +45,10 @@
 
 			- microsoft-graph (+ beta) is ~57 MB each and pulls a large Azure
 			  dependency tree (~150 MB total).
-			- bytedeco ffmpeg-platform bundles FFmpeg native binaries for every
-			  supported OS/arch (~250 MB), pushing the blob past ~400 MB. Drop
-			  it (or swap in opencv-platform too) to dial the size.
+			- bytedeco ffmpeg-platform and opencv-platform each bundle native
+			  binaries for every supported OS/arch (~250 MB and ~300 MB), so the
+			  single dependencies layer lands around ~700 MB. Drop either one to
+			  dial the size back down.
 		-->
 		<dependency>
 			<groupId>com.microsoft.graph</groupId>
@@ -63,6 +64,11 @@
 			<groupId>org.bytedeco</groupId>
 			<artifactId>ffmpeg-platform</artifactId>
 			<version>6.1.1-1.5.10</version>
+		</dependency>
+		<dependency>
+			<groupId>org.bytedeco</groupId>
+			<artifactId>opencv-platform</artifactId>
+			<version>4.9.0-1.5.10</version>
 		</dependency>
 
 		<dependency>
