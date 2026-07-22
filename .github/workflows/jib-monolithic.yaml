@@ -84,7 +84,7 @@ jobs:
           compile \
           com.google.cloud.tools:jib-maven-plugin:3.5.3-SNAPSHOT:build \
           -Djib.experimentalMonolithicBlobPush="${MONOLITHIC}" \
-          -Djib.from.image=eclipse-temurin:25-jre-alpine \
+          -Djib.from.image=eclipse-temurin:25-jdk \
           -Djib.from.platform=linux/arm64 \
           -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
           -Djib.to.tags=latest \
