@@ -1,0 +1,137 @@
+diff --git a/jib-core/src/main/java/com/google/cloud/tools/jib/global/JibSystemProperties.java b/jib-core/src/main/java/com/google/cloud/tools/jib/global/JibSystemProperties.java
+index d3fb7d3e..3c344c94 100644
+--- a/jib-core/src/main/java/com/google/cloud/tools/jib/global/JibSystemProperties.java
++++ b/jib-core/src/main/java/com/google/cloud/tools/jib/global/JibSystemProperties.java
+@@ -35,6 +35,9 @@ public class JibSystemProperties {
+ 
+   @VisibleForTesting public static final String SKIP_EXISTING_IMAGES = "jib.skipExistingImages";
+ 
++  @VisibleForTesting
++  public static final String MONOLITHIC_BLOB_PUSH = "jib.experimentalMonolithicBlobPush";
++
+   /**
+    * Gets the HTTP connection/read timeouts for registry interactions in milliseconds. This is
+    * defined by the {@code jib.httpTimeout} system property. The default value is 20000 if the
+@@ -61,6 +64,17 @@ public class JibSystemProperties {
+         || Boolean.getBoolean(CROSS_REPOSITORY_BLOB_MOUNTS);
+   }
+ 
++  /**
++   * Gets whether or not to push blobs with a single monolithic {@code PUT} (POST + PUT, no PATCH),
++   * mirroring how docker/containerd push a blob, instead of Jib's default POST + PATCH + PUT. This
++   * is an experiment defined by the {@code jib.experimentalMonolithicBlobPush} system property.
++   *
++   * @return {@code true} if the monolithic single-request push should be used, {@code false} if not
++   */
++  public static boolean useMonolithicBlobPush() {
++    return Boolean.getBoolean(MONOLITHIC_BLOB_PUSH);
++  }
++
+   /**
+    * Gets whether or not to serialize Jib's execution. This is defined by the {@code jib.serialize}
+    * system property.
+diff --git a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/BlobPusher.java b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/BlobPusher.java
+index f3419a3d..3a17294f 100644
+--- a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/BlobPusher.java
++++ b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/BlobPusher.java
+@@ -167,6 +167,60 @@ class BlobPusher {
+     }
+   }
+ 
++  /**
++   * Uploads and commits the BLOB in a single monolithic {@code PUT} (used after the initializing
++   * POST, skipping the PATCH), the way docker/containerd push a blob. The BLOB content is sent in
++   * the request body and the digest is set as the {@code digest} query parameter.
++   */
++  private class MonolithicCommitter implements RegistryEndpointProvider<Void> {
++
++    private final URL location;
++    private final Consumer<Long> writtenByteCountListener;
++
++    @Nullable
++    @Override
++    public BlobHttpContent getContent() {
++      return new BlobHttpContent(blob, MediaType.OCTET_STREAM.toString(), writtenByteCountListener);
++    }
++
++    @Override
++    public List<String> getAccept() {
++      return Collections.emptyList();
++    }
++
++    @Override
++    public Void handleResponse(Response response) {
++      return null;
++    }
++
++    /** Returns {@code location} with query parameter 'digest' set to the BLOB's digest. */
++    @Override
++    public URL getApiRoute(String apiRouteBase) {
++      return new GenericUrl(location).set("digest", blobDigest).toURL();
++    }
++
++    @Override
++    public String getHttpMethod() {
++      return HttpMethods.PUT;
++    }
++
++    @Override
++    public String getActionDescription() {
++      return BlobPusher.this.getActionDescription();
++    }
++
++    private MonolithicCommitter(URL location, Consumer<Long> writtenByteCountListener) {
++      this.location = location;
++      this.writtenByteCountListener = writtenByteCountListener;
++    }
++
++    @Override
++    public Void handleHttpResponseException(ResponseException responseException)
++        throws ResponseException, RegistryErrorException {
++      throw responseException;
++    }
++  }
++
+   /** Commits the written BLOB. */
+   private class Committer implements RegistryEndpointProvider<Void> {
+ 
+@@ -255,6 +309,18 @@ class BlobPusher {
+     return new Committer(location);
+   }
+ 
++  /**
++   * Returns a new MonolithicCommitter that uploads and commits the BLOB in a single {@code PUT}.
++   *
++   * @param location the upload URL
++   * @param writtenByteCountListener the listener for {@link Blob} push progress (written bytes)
++   * @return a {@link RegistryEndpointProvider} for uploading and committing the BLOB in one request
++   */
++  RegistryEndpointProvider<Void> monolithicCommitter(
++      URL location, Consumer<Long> writtenByteCountListener) {
++    return new MonolithicCommitter(location, writtenByteCountListener);
++  }
++
+   private RegistryErrorException buildRegistryErrorException(String reason) {
+     RegistryErrorExceptionBuilder registryErrorExceptionBuilder =
+         new RegistryErrorExceptionBuilder(getActionDescription());
+diff --git a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
+index a2d97e35..50569e67 100644
+--- a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
++++ b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
+@@ -552,6 +552,16 @@ public class RegistryClient {
+           return true;
+         }
+ 
++        if (JibSystemProperties.useMonolithicBlobPush()) {
++          timerEventDispatcher2.lap("pushBlob monolithic PUT " + blobDigest);
++
++          // PUT <Location>?digest={blob.digest} with BLOB in a single request (no PATCH)
++          callRegistryEndpoint(
++              blobPusher.monolithicCommitter(patchLocation.get(), writtenByteCountListener));
++
++          return false;
++        }
++
+         timerEventDispatcher2.lap("pushBlob PATCH " + blobDigest);
+ 
+         // PATCH <Location> with BLOB

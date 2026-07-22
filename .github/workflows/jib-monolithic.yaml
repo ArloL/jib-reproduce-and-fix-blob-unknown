@@ -1,0 +1,92 @@
+name: Jib monolithic experiment
+
+# Manually-triggered experiment for jib#4301. Builds a patched jib from the
+# pinned `jib` submodule (upstream fb949e26) with an experimental monolithic
+# blob-push path (POST + single PUT, like docker/containerd, no PATCH), then
+# pushes the large-blob demo image to ghcr.io at the DEFAULT http timeout
+# (20s) so the flaky "blob unknown to registry" (BLOB_UNKNOWN) path is
+# exercised. Runs a `baseline` variant (stock POST+PATCH+PUT) alongside the
+# `monolithic` variant so the two can be compared over several attempts.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  experiment:
+    name: "${{ matrix.variant }} #${{ matrix.attempt }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [monolithic, baseline]
+        attempt: [1, 2, 3, 4, 5]
+    steps:
+    - name: Checkout repository (with jib submodule)
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        submodules: recursive
+        persist-credentials: false
+
+    - name: Set up JDKs (11 to build jib, 25 for the demo)
+      uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+      with:
+        distribution: temurin
+        # The last version listed becomes the default JAVA_HOME (25, for the
+        # demo). The jib build step overrides JAVA_HOME to 11 because jib's
+        # Gradle 6.9.2 only runs on Java <= 16.
+        java-version: |
+          11
+          25
+        cache: maven
+
+    - name: Apply monolithic blob-push patch to the jib submodule
+      run: git -C jib apply --verbose "${GITHUB_WORKSPACE}/jib-monolithic-blob-push.patch"
+
+    - name: Build & publish patched jib to ~/.m2 (JDK 11)
+      working-directory: jib
+      env:
+        JAVA_HOME: ${{ env.JAVA_HOME_11_X64 }}
+      run: |
+        ./gradlew --console=plain --no-daemon \
+          :jib-core:publishToMavenLocal \
+          :jib-maven-plugin:publishToMavenLocal \
+          -x test -x javadoc
+
+    - name: Compute image name
+      id: image
+      env:
+        REPOSITORY: ${{ github.repository }}
+        # Unique repo per run/variant/attempt so the large dependency blob is
+        # always uploaded fresh (never a HEAD 200 short-circuit).
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.variant }}-${{ matrix.attempt }}
+      run: |
+        echo "name=ghcr.io/${REPOSITORY,,}-repro/${RUN}" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push image with patched Jib
+      working-directory: demo
+      env:
+        REGISTRY_USERNAME: ${{ github.actor }}
+        REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        IMAGE: ${{ steps.image.outputs.name }}
+        # true for the monolithic variant, false (stock POST+PATCH+PUT) for baseline
+        MONOLITHIC: ${{ matrix.variant == 'monolithic' }}
+      run: |
+        # NOTE: jib.httpTimeout is intentionally left at its 20000ms default
+        # so the failure window is exercised. Do not add -Djib.httpTimeout here.
+        ./mvnw --batch-mode --no-transfer-progress \
+          -DskipTests \
+          -Djava.util.logging.config.file=logging.properties \
+          compile \
+          com.google.cloud.tools:jib-maven-plugin:3.5.3-SNAPSHOT:build \
+          -Djib.experimentalMonolithicBlobPush="${MONOLITHIC}" \
+          -Djib.from.image=eclipse-temurin:25-jre-alpine \
+          -Djib.from.platform=linux/arm64 \
+          -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
+          -Djib.to.tags=latest \
+          -Djib.to.auth.username="${REGISTRY_USERNAME}" \
+          -Djib.to.auth.password="${REGISTRY_PASSWORD}"
