@@ -17,6 +17,8 @@ jobs:
   experiment:
     name: "${{ matrix.variant }} #${{ matrix.attempt }}"
     runs-on: ubuntu-latest
+    # Guard against a job hanging on a slow/stuck push instead of failing fast.
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -24,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: [monolithic, baseline]
-        attempt: [1, 2, 3, 4, 5]
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
     - name: Checkout repository (with jib submodule)
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -76,11 +78,15 @@ jobs:
         # true for the monolithic variant, false (stock POST+PATCH+PUT) for baseline
         MONOLITHIC: ${{ matrix.variant == 'monolithic' }}
       run: |
-        # NOTE: jib.httpTimeout is intentionally left at its 20000ms default
-        # so the failure window is exercised. Do not add -Djib.httpTimeout here.
+        # Shrink the read timeout so ghcr's finalize-commit reliably loses the
+        # race (the failure is a race between commit time and jib.httpTimeout).
+        # Applied to BOTH variants for a fair comparison. This is the same read
+        # timeout the bug rides on -- it just makes the race trip far more often
+        # than the 20000ms default, without needing an ever-bigger blob.
         ./mvnw --batch-mode --no-transfer-progress \
           -DskipTests \
           -Djava.util.logging.config.file=logging.properties \
+          -Djib.httpTimeout=5000 \
           compile \
           com.google.cloud.tools:jib-maven-plugin:3.5.3-SNAPSHOT:build \
           -Djib.experimentalMonolithicBlobPush="${MONOLITHIC}" \
