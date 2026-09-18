@@ -42,7 +42,9 @@ jobs:
       with:
         cache: maven
         distribution: temurin
-        java-version-file: .tool-versions
+        java-version: |
+          11
+          25
 
     - name: Apply fix patch to the jib submodule
       if: matrix.variant == 'fixed'
