@@ -2,15 +2,16 @@ Following up on my comment above: I dug further, and I'd like to propose a fix.
 
 **What happens**
 
-jib uploads a layer with one `PATCH`, then commits it with a bodyless `PUT …?digest=`. ghcr.io needs
+Jib uploads a layer with one `PATCH`, then commits it with a bodyless `PUT …?digest=`. ghcr.io takes
 5–11 s to commit a ~700 MB blob (measured over 10 pushes with no client timeout, all of which
-succeeded). Whenever the commit outlasts `jib.httpTimeout`, jib's I/O retry re-sends the `PUT` to the
-now-consumed upload session, and ghcr.io answers 404 with one of two codes. Across 51 such failures:
+succeeded). When the commit outlasts `jib.httpTimeout`, Jib's I/O retry re-sends the `PUT` to the same
+upload session, and ghcr.io answers 404 with one of two codes. Across 51 such failures in my test
+runs (mostly with a lowered timeout to provoke them):
 
-| code on the retried `PUT` | blob afterwards (`HEAD`) | seen |
+| code on the retried `PUT` | blob afterwards (`HEAD`) | count |
 |---|---|---|
 | `BLOB_UPLOAD_UNKNOWN` | present: the first `PUT` committed it | 40 |
-| `BLOB_UNKNOWN` | missing, even months later: the upload was lost | 11 |
+| `BLOB_UNKNOWN` | missing: the upload was lost | 11 |
 
 So most of these failures are spurious, and the rest need the blob uploaded again. This is also why
 raising `jib.httpTimeout` helps but doesn't settle it: it only lowers the odds that the commit outlasts
@@ -23,9 +24,9 @@ In `RegistryClient.pushBlob`, when the commit fails with `BLOB_UPLOAD_UNKNOWN` o
 1. `HEAD` the digest. If the blob exists, the push succeeded.
 2. Otherwise, upload the blob once more from a new session (only if the blob can be re-read).
 
-Other errors propagate as before. I have this ready with unit tests. Against ghcr.io with
-`-Djib.httpTimeout=5000` (so committing the large layer almost always times out), stock jib failed 10 of 10 pushes and the
-patched jib 1 of 10 (the upload was lost on both attempts).
+Other errors propagate as before. I have implemented this, with unit tests. Against ghcr.io with
+`-Djib.httpTimeout=5000`, which makes committing the large layer time out almost every time, stock Jib
+failed 10 of 10 pushes and the patched Jib failed 1 of 10, where the upload was lost on both attempts.
 
 Reproduction, workflows and logs: https://github.com/ArloL/jib-reproduce-and-fix-blob-unknown
 
