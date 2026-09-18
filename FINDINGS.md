@@ -1,7 +1,7 @@
 # jib #4301 — `BLOB_UNKNOWN` / `BLOB_UPLOAD_UNKNOWN` pushing large blobs to ghcr.io
 
-**Investigation record — 2026-07-22.** Written to be picked up cold in a later session. This is a
-findings dump, not a polished issue comment yet.
+**Investigation record — 2026-07-22; fix implemented 2026-09-18.** Written to be picked up cold in a
+later session. Polished upstream drafts live in `upstream/` (not yet posted).
 
 ---
 
@@ -16,16 +16,22 @@ build aborts.
   timeout (`jib.httpTimeout`, default **20 000 ms**). The timeout fires; `FailoverHttpClient` then
   **retries the same non-idempotent `PUT`**; by now the single-use upload session is consumed, so
   ghcr returns **404** and jib fails the build.
-- **The failure is SPURIOUS.** When the retry 404s, **ghcr has already committed the blob.** Verified
-  by `HEAD`ing the digests of failed jobs directly on ghcr → `200` (see “Decisive evidence” below).
-  jib trusts the 404 on the stale upload session over the actual state of the registry.
-- **Why raising the timeout only half-helps:** ghcr's commit can outlast any client timeout (the
-  reporter has seen it fail even at a 2-minute timeout). `-Djib.httpTimeout=120000` reduces the odds
-  but is not a real fix.
-- **The fix I'd recommend:** on a finalize timeout, or on a `BLOB_UNKNOWN`/`BLOB_UPLOAD_UNKNOWN` from
-  the commit step, **`HEAD` the blob digest; if present, treat the push as successful.** This is
-  timeout- and registry-latency-independent. Secondary: stop blindly re-`PUT`ing a consumed upload
-  session (restart with a fresh `POST` if the blob genuinely isn't there).
+- **The error code tells you which of two outcomes happened** (corrected 2026-09-18; the July write-up
+  called every failure spurious). Across 51 observed failures, without exception:
+
+  | 404 code on the retried `PUT` | blob on ghcr afterwards | count |
+  |---|---|---|
+  | `BLOB_UPLOAD_UNKNOWN` | present, immediately (spurious failure) | 40 |
+  | `BLOB_UNKNOWN` | absent, even months later (upload lost; GET also 404) | 11 |
+
+- **ghcr only fails after jib disconnects.** With `jib.httpTimeout=600000`, 10/10 pushes succeeded;
+  ghcr committed the 716 MB blob in **5.1–10.7 s** (run `35363222125`).
+- **Why raising the timeout only half-helps:** it lowers the odds that the commit outlasts the timeout;
+  commit time depends on blob size and ghcr load (the reporter once saw a failure even at 2 minutes,
+  cause unverified).
+- **The fix (implemented):** when the commit fails with `BLOB_UPLOAD_UNKNOWN` or `BLOB_UNKNOWN`,
+  `HEAD` the digest; present → success; absent → upload once more from a new session (if
+  `Blob.isRetryable()`). See “The fix” below.
 - **Monolithic push (docker-style POST + single PUT, no separate finalize) is a mitigation, not a
   fix** — it pushed 20/20 cleanly in testing, but its own commit wait is exposed to the same ghcr
   slowness. Implemented behind `-Djib.experimentalMonolithicBlobPush` for the experiment.
@@ -86,13 +92,14 @@ consumed, so ghcr 404s. jib surfaces that as `BLOB_UNKNOWN` / `BLOB_UPLOAD_UNKNO
 - `registry/RegistryEndpointCaller.java:132` — that value applied as **connect and read** timeout on
   every request, including the finalize PUT.
 
-The two 404 error codes (`BLOB_UNKNOWN` vs `BLOB_UPLOAD_UNKNOWN`) are the **same bug** — both are
-ghcr rejecting the re-`PUT` of a consumed upload session. The original report saw both
-(`job-logs.txt` = `BLOB_UNKNOWN`, `job-logs2.txt` = `BLOB_UPLOAD_UNKNOWN`).
+Both 404 codes come from the same trigger (the retried `PUT`), but they report **different
+outcomes**: `BLOB_UPLOAD_UNKNOWN` = the first `PUT` committed the blob; `BLOB_UNKNOWN` = the upload was
+lost. See the TL;DR table. The original report saw both (`job-logs.txt` = `BLOB_UNKNOWN`,
+`job-logs2.txt` = `BLOB_UPLOAD_UNKNOWN`).
 
 ---
 
-## Decisive evidence — the blob is already committed
+## Evidence — committed vs lost blobs
 
 After failed `baseline` jobs (run `29899201282`), I `HEAD`ed the blob digests directly on ghcr:
 
@@ -103,10 +110,10 @@ baseline #2/#5/#8/#10  HEAD (big deps blob d14cbaca…) -> 200
 tags/list -> 404   (manifest never written; jib aborted, so the committed blob is orphaned)
 ```
 
-So the finalize `PUT` **did** commit the blob server-side; ghcr just answered too slowly, the session
-expired, and the retry 404'd on the stale session while the blob was present. The build failure is
-spurious. This is why no finite `jib.httpTimeout` reliably fixes it, and why the correct fix is to
-`HEAD`-verify rather than trust the 404.
+Those jobs all got `BLOB_UPLOAD_UNKNOWN`. The one job in that run with `BLOB_UNKNOWN` (`#7`) was not
+checked in July; its blob is absent (checked 2026-09-18), as is `29898470121` `#2` (`BLOB_UNKNOWN`).
+Scripts to re-check: `head_failed`/`table` logic lives in this session's scratchpad only; the method
+is `HEAD /v2/<repo>/blobs/<digest>` with `Authorization: Bearer $(gh auth token | base64)`.
 
 ---
 
@@ -227,16 +234,25 @@ the failed blobs are present on ghcr anyway (Decisive evidence).
 Aggregate: monolithic pushed the same ~700 MB **20/20** cleanly across runs 2–3; baseline fails
 deterministically at 5 s and intermittently at 20 s.
 
+2026-09-18 runs (`jib-fix.yaml` / `jib-commit-latency.yaml`, same image, 10 jobs per variant):
+
+| Run ID | Config | Result |
+|---|---|---|
+| `35361358023` | 5 s; baseline vs first fix (HEAD-verify only) | baseline 0/10; fix 5/10 — all 5 failures `BLOB_UNKNOWN` (upload lost) |
+| `35363222125` | stock, `jib.httpTimeout=600000` | 10/10; commit 5.1–10.7 s |
+| `35364024602` | 5 s; baseline vs final fix (HEAD-verify + one re-upload) | baseline 0/10; fix **9/10** — the failure lost the upload on both attempts |
+
 ---
 
 ## Facts / gotchas learned (so I don't re-derive them)
 
-- The 404 is spurious — **`HEAD` the digest to confirm the blob is really there** before believing a
-  push failed.
-- `BLOB_UNKNOWN` and `BLOB_UPLOAD_UNKNOWN` are the same bug (stale upload session on retry).
+- `BLOB_UPLOAD_UNKNOWN` on the retried commit = blob committed; `BLOB_UNKNOWN` = upload lost. Always
+  `HEAD` the digest before concluding either way.
+- ghcr never failed when jib waited for the commit (10/10 at 600 s timeout).
 - jib does **one big PATCH**, not chunked; the finalize PUT is **bodyless** — that bodyless wait is
   the fragile step.
-- Raising `jib.httpTimeout` is unreliable because ghcr commit time is unbounded from the client side.
+- Raising `jib.httpTimeout` only lowers the odds; commit time grows with blob size and ghcr load.
+- Root `.tool-versions` lists only JDK 25; workflows must install JDK 11 explicitly for jib's Gradle.
 - Reproduce **reliably** by lowering the timeout (5 s), not by enlarging the blob.
 - Build jib with **JDK 11** (Gradle 6.9.2); use mise. Demo uses JDK 25.
 - Unique ghcr repos are required, else jib sees the blob (HEAD 200) and skips the upload.
@@ -262,16 +278,38 @@ deterministically at 5 s and intermittently at 20 s.
 
 ---
 
-## Open questions / next steps
+## The fix (2026-09-18)
 
-- Confirm the `HEAD`-verify fix against a real jib change: on finalize timeout / commit 404, HEAD the
-  digest and accept if present; only fail if genuinely absent. Then re-run `29899201282`-style at 5 s
-  and expect baseline to pass too.
-- Decide framing for upstream: primary fix = HEAD-verify (+ don't re-PUT consumed session); secondary
-  = monolithic opt-in. Draft PR against jib.
-- Tidy the reporter's narrative below (line “chunked upload” is really jib's single PATCH) before
-  posting as an issue comment.
-- Clean up ghcr packages once done.
+Submodule branch `fix-4301-verify-committed-blob` (local only; never commit the `jib` submodule
+pointer). Exported as `jib-verify-committed-blob.patch`. Built test-first.
+
+- `RegistryClient.pushBlob`: when the commit throws `RegistryErrorException` whose cause carries
+  `BLOB_UNKNOWN`/`BLOB_UPLOAD_UNKNOWN`: `checkBlob` (HEAD); present → success (debug log); absent →
+  upload again from a fresh `POST` (warn log), at most 2 attempts total, only if `blob.isRetryable()`.
+  If the HEAD itself fails, the original commit error is thrown with the HEAD error suppressed. Other
+  commit errors propagate unchanged.
+- `RegistryClientTest`: six deterministic tests against a `com.sun.net.httpserver` fake registry
+  (`TestWebServer` can't do PUT/PATCH bodies). `logContains` made type-safe (`pushBlob` also
+  dispatches `TimerEvent`s).
+- Verified: jib-core 609 tests on JDK 8 (Zulu 8; no arm64 Temurin 8) and JDK 11; full `build` on JDK 11
+  passes except 7 `jib-maven-plugin` skaffold mojo tests that fail identically on upstream master on
+  this machine; jib-core registry integration tests (BlobPusher/ManifestPusher etc.) pass against
+  local `registry:2` — 3 environmental failures (`docker-credential-gcr` missing; Docker daemon
+  refuses HTTP push to `localhost:5000`).
+- Re-upload re-reports progress; `ProgressEventDispatcher` clamps, same as existing PATCH IO retries.
+- Not done: stopping `FailoverHttpClient` from retrying non-idempotent requests. Out of scope.
+
+Upstream process: jib accepts PRs only on issues labeled "Accepting Contributions" (#4301 is not;
+that's why #4504 was withdrawn). Order: post `upstream/issue-comment.md`, wait for the label, then open
+the PR with `upstream/pr-description.md`. Git email `tiger@k5d.de` must match the signed Google CLA.
+
+## Next steps
+
+- Review/merge repro PR #29.
+- Upstream: post `upstream/issue-comment.md` on #4301; after the label, fork jib, push
+  `fix-4301-verify-committed-blob`, open the PR with `upstream/pr-description.md`.
+- Clean up ghcr packages after upstream has the evidence (`scripts/delete-repro-packages.py`).
+- Run logs from July expire ~2026-10-20.
 
 ---
 
