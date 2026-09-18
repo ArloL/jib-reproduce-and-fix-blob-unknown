@@ -18,7 +18,17 @@ jobs:
         variant:
         - fixed
         - baseline
-        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        attempt:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+        - 8
+        - 9
+        - 10
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -36,10 +46,7 @@ jobs:
       with:
         cache: maven
         distribution: temurin
-        java-version: |
-          11
-          25
-
+        java-version-file: .tool-versions
     - name: Apply fix patch to the jib submodule
       if: matrix.variant == 'fixed'
       run: git -C jib apply --verbose "${GITHUB_WORKSPACE}/jib-verify-committed-blob.patch"
@@ -53,7 +60,6 @@ jobs:
           :jib-core:publishToMavenLocal \
           :jib-maven-plugin:publishToMavenLocal \
           -x test -x javadoc
-
     - name: Compute image name
       id: image
       env:
@@ -62,7 +68,6 @@ jobs:
         RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.variant }}-${{ matrix.attempt }}
       run: |
         echo "name=ghcr.io/${REPOSITORY,,}-repro/${RUN}" >> "${GITHUB_OUTPUT}"
-
     - name: Build and push image
       working-directory: demo
       env:
