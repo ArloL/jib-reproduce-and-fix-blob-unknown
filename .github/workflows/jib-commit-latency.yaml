@@ -1,0 +1,82 @@
+name: Jib commit latency
+
+# jib#4301: measures how long ghcr.io takes to commit the large blob, and whether it
+# fails without client timeouts. Stock jib, jib.httpTimeout=600000 (no read timeouts).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - head-verify-fix
+    paths:
+    - .github/workflows/jib-commit-latency.yaml
+permissions: {}
+
+jobs:
+  experiment:
+    name: '${{ matrix.variant }} #${{ matrix.attempt }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+        - stock
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout repository (with jib submodule)
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        submodules: recursive
+
+    - name: Set up JDKs (11 to build jib, 25 for the demo)
+      uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      with:
+        cache: maven
+        distribution: temurin
+        java-version: |
+          11
+          25
+
+    - name: Build & publish jib to ~/.m2 (JDK 11)
+      working-directory: jib
+      env:
+        JAVA_HOME: ${{ env.JAVA_HOME_11_X64 }}
+      run: |
+        ./gradlew --console=plain --no-daemon \
+          :jib-core:publishToMavenLocal \
+          :jib-maven-plugin:publishToMavenLocal \
+          -x test -x javadoc
+
+    - name: Compute image name
+      id: image
+      env:
+        REPOSITORY: ${{ github.repository }}
+        # Unique repo per job so blobs always upload fresh.
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.variant }}-${{ matrix.attempt }}
+      run: |
+        echo "name=ghcr.io/${REPOSITORY,,}-repro/${RUN}" >> "${GITHUB_OUTPUT}"
+
+    - name: Build and push image
+      working-directory: demo
+      env:
+        REGISTRY_USERNAME: ${{ github.actor }}
+        REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        IMAGE: ${{ steps.image.outputs.name }}
+      run: |
+        ./mvnw --batch-mode --no-transfer-progress \
+          -DskipTests \
+          -Djava.util.logging.config.file=logging.properties \
+          -Djib.httpTimeout=600000 \
+          compile \
+          com.google.cloud.tools:jib-maven-plugin:3.5.3-SNAPSHOT:build \
+          -Djib.from.image=eclipse-temurin:25-jdk \
+          -Djib.from.platform=linux/arm64 \
+          -Djib.to.image="${IMAGE}:${GITHUB_SHA}" \
+          -Djib.to.tags=latest \
+          -Djib.to.auth.username="${REGISTRY_USERNAME}" \
+          -Djib.to.auth.password="${REGISTRY_PASSWORD}"
