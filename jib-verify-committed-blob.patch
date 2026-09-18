@@ -1,4 +1,4 @@
-From af012596f1c2840289322ae3fdf31e59edebaf19 Mon Sep 17 00:00:00 2001
+From fc01169556c7e84ea3e6126a2f9e8b600a334c1d Mon Sep 17 00:00:00 2001
 From: Arlo O'Keeffe <tiger@k5d.de>
 Date: Fri, 18 Sep 2026 17:10:40 +0200
 Subject: [PATCH] fix: recover when a registry rejects a BLOB commit it
@@ -17,8 +17,8 @@ Fixes #4301
 Claude-Session: https://claude.ai/code/session_012FfNJJLZ9ysezzEA5ayoSN
 ---
  .../tools/jib/registry/RegistryClient.java    |  97 ++++++++--
- .../jib/registry/RegistryClientTest.java      | 174 +++++++++++++++++-
- 2 files changed, 250 insertions(+), 21 deletions(-)
+ .../jib/registry/RegistryClientTest.java      | 175 +++++++++++++++++-
+ 2 files changed, 251 insertions(+), 21 deletions(-)
 
 diff --git a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
 index a2d97e35..0f6f203a 100644
@@ -151,7 +151,7 @@ index a2d97e35..0f6f203a 100644
     * Check if the authorization allows using the specified repository can be mounted by the remote
     * registry as a source for blobs. More specifically, we can only check if the repository is not
 diff --git a/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java b/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
-index 97f72cda..c25904fc 100644
+index 97f72cda..d81e7286 100644
 --- a/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
 +++ b/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
 @@ -18,22 +18,33 @@ package com.google.cloud.tools.jib.registry;
@@ -206,7 +206,7 @@ index 97f72cda..c25904fc 100644
    }
  
    @Test
-@@ -381,6 +396,160 @@ public class RegistryClientTest {
+@@ -381,6 +396,161 @@ public class RegistryClientTest {
          CoreMatchers.containsString("GET /v2/foo/bar/manifests/image-tag "));
    }
  
@@ -296,9 +296,10 @@ index 97f72cda..c25904fc 100644
 +
 +  /**
 +   * Starts a registry that accepts BLOB uploads. It answers commits ({@code PUT}) and BLOB checks
-+   * ({@code HEAD}) in order from the given lists. A commit response is either "201" or an error
-+   * code; {@code BLOB_UNKNOWN} and {@code BLOB_UPLOAD_UNKNOWN} are sent with 404, like ghcr.io does
-+   * when a commit is retried after a read timeout, and other codes with 400.
++   * ({@code HEAD}) in order from the given lists, and with 500 once a list runs out. A commit
++   * response is either "201" or an error code; {@code BLOB_UNKNOWN} and {@code BLOB_UPLOAD_UNKNOWN}
++   * are sent with 404, like ghcr.io does when a commit is retried after a read timeout, and other
++   * codes with 400.
 +   *
 +   * @return the requests received, as the method (and the path for {@code HEAD})
 +   */
@@ -325,9 +326,9 @@ index 97f72cda..c25904fc 100644
 +                  exchange.sendResponseHeaders(202, -1);
 +                  break;
 +                case "PUT":
-+                  String commit = commits.next();
-+                  if ("201".equals(commit)) {
-+                    exchange.sendResponseHeaders(201, -1);
++                  String commit = commits.hasNext() ? commits.next() : "500";
++                  if ("201".equals(commit) || "500".equals(commit)) {
++                    exchange.sendResponseHeaders(Integer.parseInt(commit), -1);
 +                    break;
 +                  }
 +                  // e.g. BLOB_UPLOAD_UNKNOWN -> "blob upload unknown to registry"
@@ -343,7 +344,7 @@ index 97f72cda..c25904fc 100644
 +                  break;
 +                case "HEAD":
 +                  exchange.getResponseHeaders().set("Content-Length", "5");
-+                  exchange.sendResponseHeaders(blobChecks.next(), -1);
++                  exchange.sendResponseHeaders(blobChecks.hasNext() ? blobChecks.next() : 500, -1);
 +                  break;
 +                default:
 +                  exchange.sendResponseHeaders(405, -1);
@@ -367,7 +368,7 @@ index 97f72cda..c25904fc 100644
    /**
     * Sets up an auth server and a registry. The auth server can return a bearer token up to {@code
     * maxAuthTokens} times. The registry will initially return "401 Unauthorized" for {@code
-@@ -412,7 +581,8 @@ public class RegistryClientTest {
+@@ -412,7 +582,8 @@ public class RegistryClientTest {
    }
  
    private LogEvent logContains(String substring) {
