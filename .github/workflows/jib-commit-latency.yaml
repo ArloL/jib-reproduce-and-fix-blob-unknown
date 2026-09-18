@@ -5,11 +5,6 @@ name: Jib commit latency
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-    - head-verify-fix
-    paths:
-    - .github/workflows/jib-commit-latency.yaml
 permissions: {}
 
 jobs:
