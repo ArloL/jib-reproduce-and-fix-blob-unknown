@@ -112,8 +112,7 @@ tags/list -> 404   (manifest never written; jib aborted, so the committed blob i
 
 Those jobs all got `BLOB_UPLOAD_UNKNOWN`. The one job in that run with `BLOB_UNKNOWN` (`#7`) was not
 checked in July; its blob is absent (checked 2026-09-18), as is `29898470121` `#2` (`BLOB_UNKNOWN`).
-Scripts to re-check: `head_failed`/`table` logic lives in this session's scratchpad only; the method
-is `HEAD /v2/<repo>/blobs/<digest>` with `Authorization: Bearer $(gh auth token | base64)`.
+Re-check with `scripts/ghcr-failure-table.py` (`HEAD /v2/<repo>/blobs/<digest>`, `Authorization: Bearer $(gh auth token | base64)`).
 
 ---
 
@@ -303,13 +302,63 @@ Upstream process: jib accepts PRs only on issues labeled "Accepting Contribution
 that's why #4504 was withdrawn). Order: post `upstream/issue-comment.md`, wait for the label, then open
 the PR with `upstream/pr-description.md`. Git email `tiger@k5d.de` must match the signed Google CLA.
 
-## Next steps
+## Handoff: opening the upstream PR
 
-- Review/merge repro PR #29.
-- Upstream: post `upstream/issue-comment.md` on #4301; after the label, fork jib, push
-  `fix-4301-verify-committed-blob`, open the PR with `upstream/pr-description.md`.
-- Clean up ghcr packages after upstream has the evidence (`scripts/delete-repro-packages.py`).
-- Run logs from July expire ~2026-10-20.
+**Status (2026-09-18):** fix proposal posted on #4301
+(https://github.com/GoogleContainerTools/jib/issues/4301#issuecomment-5732746968), asking
+@mpeddada1 for the "Accepting Contributions" label. Don't open the PR before the label exists (#4504
+was withdrawn for that). Check: `gh issue view 4301 --repo GoogleContainerTools/jib --comments`.
+
+**The fix** is local-only commit `fc011695` on submodule branch `fix-4301-verify-committed-blob`.
+Durable copy: `jib-verify-committed-blob.patch` (identical). Recreate:
+`git -C jib switch --create fix-4301-verify-committed-blob fb949e26 && git -C jib am ../jib-verify-committed-blob.patch`.
+Never commit the `jib` submodule pointer.
+
+**Before opening**
+
+1. `git -C jib fetch origin` — if master moved past `fb949e26`, rebase the branch and re-verify.
+2. Verify (from `jib/`; JDK 17+ can't run Gradle 6.9.2):
+   - `mise exec java@temurin-11 -- ./gradlew :jib-core:check`
+   - `mise exec java@zulu-8.96.0.19 -- ./gradlew clean :jib-core:build` (no arm64 Temurin 8)
+   - `mise exec java@temurin-11 -- ./gradlew :jib-core:integrationTest --tests 'com.google.cloud.tools.jib.registry.*'`
+     (Docker). Known environmental failures: `DockerCredentialHelperIntegrationTest` ×2, `ManifestPullerIntegrationTest`.
+   - Full `build` also fails 7 `jib-maven-plugin` skaffold mojo tests on this machine — identical on
+     unmodified master, so not ours.
+3. User decisions: Google CLA must cover the commit email `tiger@k5d.de`; keep or drop the
+   `Claude-Session:` trailer (harmless; upstream squash-merges with the PR title/body).
+
+**Opening**
+
+- `gh repo fork GoogleContainerTools/jib --clone=false`, push the branch to the fork, then
+  `gh pr create --repo GoogleContainerTools/jib --head ArloL:fix-4301-verify-committed-blob`.
+- Title and body: `upstream/pr-description.md` (first line is the title comment; drop it). Unwrap
+  paragraphs first: GitHub renders single newlines as line breaks.
+- Expect the google-cla bot and a gemini-code-assist review.
+
+**Review decisions already made** (independent review: no critical/important issues)
+
+- Applied: fake registry answers 500 once its script runs out, so regressions fail in ms, not ~72 s.
+- Declined: test for 201 on the re-upload POST (existing initializer behavior, not new logic); hint to
+  raise `jib.httpTimeout` in the warn log (cause isn't always a timeout on other registries); binding
+  the test server to loopback (client uses `localhost`, which may resolve to `::1`); renaming
+  `MAX_BLOB_UPLOAD_ATTEMPTS`/`isBlobPresent` (cosmetic).
+
+**Likely maintainer questions**
+
+- *Why not stop retrying the PUT?* In the PR body: the retry helps real connection failures, and a lost
+  upload needs re-uploading anyway.
+- *Why one re-upload?* A lost upload is ~20% of commit timeouts at 5 s; losing both attempts ~4%
+  (observed 1/10). At the default 20 s, commit timeouts themselves are rare. More retries of a large
+  blob cost more than they save.
+- *Why HEAD for both codes?* Cheap, and doesn't assume ghcr's code semantics hold on other registries.
+- *Progress on re-upload?* `ProgressEventDispatcher` clamps at 100%, same as existing PATCH IO retries.
+
+**Evidence tooling:** `scripts/ghcr-failure-table.py RUN_ID DIGEST` (codes vs blob presence per job),
+`scripts/ghcr-commit-latency.py RUN_ID`. Big layer digest: `sha256:03e3a23a…` (Sept runs),
+`sha256:d14cbaca…` (July). Logs: July runs expire ~2026-10-20, September runs ~2026-12-17.
+
+**After upstream merges:** delete ghcr packages (`scripts/delete-repro-packages.py`), the fork branch,
+and consider archiving this repo.
 
 ---
 
