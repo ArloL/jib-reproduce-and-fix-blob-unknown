@@ -16,7 +16,7 @@ Fixes #4301 🛠️
 
 jib commits an uploaded BLOB with a bodyless `PUT …?digest=`. ghcr.io can take longer than
 `jib.httpTimeout` to commit a large BLOB; the read times out, and `FailoverHttpClient` re-sends the
-`PUT` to the consumed upload session. ghcr.io then answers 404 with:
+`PUT` to the same upload session. ghcr.io then answers 404 with:
 
 - `BLOB_UPLOAD_UNKNOWN` when the first `PUT` committed the BLOB (40 of 51 observed failures), or
 - `BLOB_UNKNOWN` when the upload was lost (11 of 51).
