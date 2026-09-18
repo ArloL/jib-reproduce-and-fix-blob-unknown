@@ -1,0 +1,190 @@
+From edceff1da79028fb30b5ad244a4f91358a22af1a Mon Sep 17 00:00:00 2001
+From: Arlo O'Keeffe <tiger@k5d.de>
+Date: Fri, 18 Sep 2026 17:10:40 +0200
+Subject: [PATCH] fix: verify BLOB exists when commit fails after a timed-out
+ retry
+
+When a registry (e.g., ghcr.io) commits a large BLOB slower than the
+read timeout, the finalize PUT is retried against an already-consumed
+upload session and fails with BLOB_UNKNOWN / BLOB_UPLOAD_UNKNOWN even
+though the BLOB was committed. Check the BLOB with HEAD before failing.
+
+Fixes #4301
+---
+ .../tools/jib/registry/RegistryClient.java    |  14 ++-
+ .../jib/registry/RegistryClientTest.java      | 114 ++++++++++++++++++
+ 2 files changed, 127 insertions(+), 1 deletion(-)
+
+diff --git a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
+index a2d97e35..a3f85c86 100644
+--- a/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
++++ b/jib-core/src/main/java/com/google/cloud/tools/jib/registry/RegistryClient.java
+@@ -561,7 +561,19 @@ public class RegistryClient {
+         timerEventDispatcher2.lap("pushBlob PUT " + blobDigest);
+ 
+         // PUT <Location>?digest={blob.digest}
+-        callRegistryEndpoint(blobPusher.committer(putLocation));
++        try {
++          callRegistryEndpoint(blobPusher.committer(putLocation));
++        } catch (RegistryErrorException ex) {
++          // A commit that outlasts the read timeout may still succeed; the retried PUT then fails
++          // (e.g., BLOB_UPLOAD_UNKNOWN) because the upload session is consumed.
++          // https://github.com/GoogleContainerTools/jib/issues/4301
++          if (!checkBlob(blobDigest).isPresent()) {
++            throw ex;
++          }
++          eventHandlers.dispatch(
++              LogEvent.debug(
++                  "Commit of BLOB " + blobDigest + " failed but the BLOB exists; ignoring: " + ex));
++        }
+ 
+         return false;
+       }
+diff --git a/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java b/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
+index 97f72cda..064d36b1 100644
+--- a/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
++++ b/jib-core/src/test/java/com/google/cloud/tools/jib/registry/RegistryClientTest.java
+@@ -22,12 +22,19 @@ import com.google.cloud.tools.jib.api.LogEvent;
+ import com.google.cloud.tools.jib.api.RegistryException;
+ import com.google.cloud.tools.jib.api.RegistryUnauthorizedException;
+ import com.google.cloud.tools.jib.blob.BlobDescriptor;
++import com.google.cloud.tools.jib.blob.Blobs;
+ import com.google.cloud.tools.jib.event.EventHandlers;
++import com.google.cloud.tools.jib.global.JibSystemProperties;
+ import com.google.cloud.tools.jib.http.TestWebServer;
+ import com.google.cloud.tools.jib.image.json.V22ManifestListTemplate;
+ import com.google.cloud.tools.jib.image.json.V22ManifestTemplate;
++import com.google.common.io.ByteStreams;
++import com.google.common.util.concurrent.Uninterruptibles;
++import com.sun.net.httpserver.HttpServer;
+ import java.io.IOException;
++import java.net.InetSocketAddress;
+ import java.net.URISyntaxException;
++import java.nio.charset.StandardCharsets;
+ import java.security.DigestException;
+ import java.security.GeneralSecurityException;
+ import java.util.ArrayList;
+@@ -35,6 +42,9 @@ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+ import java.util.Optional;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
+ import javax.annotation.Nullable;
+ import org.hamcrest.CoreMatchers;
+ import org.hamcrest.MatcherAssert;
+@@ -381,6 +391,110 @@ public class RegistryClientTest {
+         CoreMatchers.containsString("GET /v2/foo/bar/manifests/image-tag "));
+   }
+ 
++  @Test
++  public void testPushBlob_commitRetryRejectedButBlobCommitted()
++      throws IOException, RegistryException {
++    List<String> requests = Collections.synchronizedList(new ArrayList<>());
++    HttpServer server = startSlowCommitRegistry(true, requests);
++    System.setProperty(JibSystemProperties.HTTP_TIMEOUT, "300");
++    try {
++      RegistryClient registryClient =
++          RegistryClient.factory(
++                  eventHandlers,
++                  "localhost:" + server.getAddress().getPort(),
++                  "foo/bar",
++                  new PlainHttpClient())
++              .newRegistryClient();
++
++      Assert.assertFalse(registryClient.pushBlob(digest, Blobs.from("hello"), null, ignored -> {}));
++      Assert.assertEquals("HEAD /v2/foo/bar/blobs/" + digest, requests.get(requests.size() - 1));
++    } finally {
++      System.clearProperty(JibSystemProperties.HTTP_TIMEOUT);
++      server.stop(0);
++    }
++  }
++
++  @Test
++  public void testPushBlob_commitRetryRejectedAndBlobMissing()
++      throws IOException, RegistryException {
++    List<String> requests = Collections.synchronizedList(new ArrayList<>());
++    HttpServer server = startSlowCommitRegistry(false, requests);
++    System.setProperty(JibSystemProperties.HTTP_TIMEOUT, "300");
++    try {
++      RegistryClient registryClient =
++          RegistryClient.factory(
++                  eventHandlers,
++                  "localhost:" + server.getAddress().getPort(),
++                  "foo/bar",
++                  new PlainHttpClient())
++              .newRegistryClient();
++
++      try {
++        registryClient.pushBlob(digest, Blobs.from("hello"), null, ignored -> {});
++        Assert.fail();
++      } catch (RegistryErrorException ex) {
++        MatcherAssert.assertThat(
++            ex.getMessage(), CoreMatchers.containsString("blob upload unknown to registry"));
++      }
++    } finally {
++      System.clearProperty(JibSystemProperties.HTTP_TIMEOUT);
++      server.stop(0);
++    }
++  }
++
++  /**
++   * Mimics ghcr.io committing a large BLOB: the first commit {@code PUT} outlasts the client read
++   * timeout (the BLOB is committed anyway), so the retried {@code PUT} hits a consumed upload
++   * session and gets 404 {@code BLOB_UPLOAD_UNKNOWN}.
++   */
++  private static HttpServer startSlowCommitRegistry(boolean blobCommitted, List<String> requests)
++      throws IOException {
++    AtomicInteger commits = new AtomicInteger();
++    HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
++    server.setExecutor(Executors.newCachedThreadPool());
++    server
++        .createContext("/")
++        .setHandler(
++            exchange -> {
++              String method = exchange.getRequestMethod();
++              requests.add(method + " " + exchange.getRequestURI().getPath());
++              ByteStreams.exhaust(exchange.getRequestBody());
++              switch (method) {
++                case "POST":
++                case "PATCH":
++                  exchange.getResponseHeaders().set("Location", "/upload");
++                  exchange.sendResponseHeaders(202, -1);
++                  break;
++                case "PUT":
++                  if (commits.getAndIncrement() == 0) {
++                    Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
++                    exchange.sendResponseHeaders(201, -1);
++                  } else {
++                    byte[] body =
++                        ("{\"errors\":[{\"code\":\"BLOB_UPLOAD_UNKNOWN\","
++                                + "\"message\":\"blob upload unknown to registry\"}]}")
++                            .getBytes(StandardCharsets.UTF_8);
++                    exchange.sendResponseHeaders(404, body.length);
++                    exchange.getResponseBody().write(body);
++                  }
++                  break;
++                case "HEAD":
++                  if (blobCommitted) {
++                    exchange.getResponseHeaders().set("Content-Length", "5");
++                    exchange.sendResponseHeaders(200, -1);
++                  } else {
++                    exchange.sendResponseHeaders(404, -1);
++                  }
++                  break;
++                default:
++                  exchange.sendResponseHeaders(500, -1);
++              }
++              exchange.close();
++            });
++    server.start();
++    return server;
++  }
++
+   /**
+    * Sets up an auth server and a registry. The auth server can return a bearer token up to {@code
+    * maxAuthTokens} times. The registry will initially return "401 Unauthorized" for {@code
+-- 
+2.54.0 (Apple Git-157)
+
