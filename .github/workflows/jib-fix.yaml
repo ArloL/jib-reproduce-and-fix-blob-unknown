@@ -6,6 +6,12 @@ name: Jib HEAD-verify fix
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+    - head-verify-fix
+    paths:
+    - .github/workflows/jib-fix.yaml
+    - jib-verify-committed-blob.patch
 
 permissions: {}
 
